@@ -2,93 +2,101 @@ name: Quark签到
 
 on:
   schedule:
-    - cron: '0 1 * * *'   # 北京时间 09:00 (UTC+8 -> UTC+1)
-    - cron: '0 5 * * *'   # 北京时间 13:00 (UTC+8 -> UTC+5)
-  workflow_dispatch:      # 允许手动触发
+    - cron: '0 1 * * *'   # 北京时间 09:00（01:00 UTC）
+    - cron: '0 5 * * *'   # 北京时间 13:00（05:00 UTC）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: quark-signin-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   check-if-already-signed:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
-      skip: ${{ steps.check.outputs.skip }}
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v3
+      should_run: ${{ steps.check.outputs.should_run }}
+      today: ${{ steps.date.outputs.today }}
 
-      - name: 恢复签到成功记录缓存
-        id: cache-success-restore
-        uses: actions/cache@v4
+    steps:
+      - name: 获取北京时间日期
+        id: date
+        run: echo "today=$(TZ='Asia/Shanghai' date '+%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: 查找今日签到成功标记
+        id: cache-success
+        uses: actions/cache/restore@v6
         with:
-          path: .last_success_date
-          key: last-success-marker
+          path: .cache/quark-signin
+          key: quark-signed-${{ steps.date.outputs.today }}
+          lookup-only: true
 
       - name: 判断是否已签到
         id: check
+        env:
+          CACHE_HIT: ${{ steps.cache-success.outputs.cache-hit }}
         run: |
-          current_date=$(TZ='Asia/Shanghai' date '+%Y-%m-%d')
-          echo "当前北京时间: $current_date"
-
-          if [ -f .last_success_date ]; then
-            last_date=$(cat .last_success_date)
-            echo "上次签到日期: $last_date"
-            if [ "$last_date" = "$current_date" ]; then
-              echo "今天已成功签到，跳过执行。"
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "今天已成功签到，跳过执行。"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "今天尚未签到，继续执行。"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
           fi
-
-          echo "今天尚未签到，继续执行。"
-          echo "skip=true" >> "$GITHUB_OUTPUT"
 
   sign-in:
     needs: check-if-already-signed
-    if: needs.check-if-already-signed.outputs.skip == 'true'
-    runs-on: ubuntu-latest
+    if: needs.check-if-already-signed.outputs.should_run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
     steps:
       - name: 检出代码
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: 随机延迟（早上）
         if: github.event.schedule == '0 1 * * *'
         run: |
           delay=$((RANDOM % 60))
-          echo "早上签到，延迟 $delay 秒后开始.."
-          sleep $delay
+          echo "早上签到，延迟 $delay 秒后开始..."
+          sleep "$delay"
 
       - name: 随机延迟（下午/手动触发）
         if: github.event.schedule == '0 5 * * *' || github.event_name == 'workflow_dispatch'
         run: |
           delay=$((RANDOM % 30))
-          echo "下午兜底或手动触发，延迟 $delay 秒后开始.."
-          sleep $delay
+          echo "下午兜底或手动触发，延迟 $delay 秒后开始..."
+          sleep "$delay"
 
-      - name: 设置Python环境
-        uses: actions/setup-python@v4
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
       - name: 安装依赖
-        run: pip install requests
+        run: python -m pip install --disable-pip-version-check requests
 
       - name: 执行签到脚本
         env:
           COOKIE_QUARK: ${{ secrets.COOKIE_QUARK }}
         run: python checkIn_Quark.py
 
-      - name: 标记今天签到成功
+      - name: 生成今日成功标记
         if: success()
         run: |
-          date_str=$(TZ='Asia/Shanghai' date '+%Y-%m-%d')
-          echo "$date_str" > .last_success_date
-          echo "已记录成功签到日期: $date_str"
+          mkdir -p .cache/quark-signin
+          echo "${{ needs.check-if-already-signed.outputs.today }}" > .cache/quark-signin/success
+          echo "已记录成功签到日期: ${{ needs.check-if-already-signed.outputs.today }}"
 
-      - name: 保存成功记录到缓存
+      - name: 保存今日成功标记
         if: success()
-        uses: actions/cache@v4
+        uses: actions/cache/save@v6
         with:
-          path: .last_success_date
-          key: last-success-marker
+          path: .cache/quark-signin
+          key: quark-signed-${{ needs.check-if-already-signed.outputs.today }}
 
       - name: 清理旧的工作流记录
         uses: Mattraks/delete-workflow-runs@main
